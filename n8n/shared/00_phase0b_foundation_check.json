@@ -1,0 +1,273 @@
+{
+  "id": "tVdpgRB0yxRg4yGG",
+  "name": "linkedin_automation / shared / 00_phase0b_foundation_check",
+  "active": false,
+  "nodes": [
+    {
+      "id": "webhook_trigger",
+      "name": "Webhook",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "phase-0b-foundation-check",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "position": [0, 300],
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "webhookId": "7ff60e7c-0edd-4a20-9294-208af2f6e63a"
+    },
+    {
+      "id": "gen_trace_id",
+      "name": "Generate Trace ID",
+      "parameters": {
+        "action": "generate",
+        "dataPropertyName": "trace_id",
+        "encodingType": "uuid"
+      },
+      "position": [224, 300],
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 1
+    },
+    {
+      "credentials": {
+        "supabaseApi": {
+          "id": "fQXC9iR0pHJF63Ir",
+          "name": "linkedin_automation"
+        }
+      },
+      "id": "insert_workflow_run",
+      "name": "Insert Workflow Run",
+      "parameters": {
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "trace_id", "fieldValue": "={{ $json.trace_id }}" },
+            { "fieldId": "workflow_type", "fieldValue": "phase_0b_foundation_check" },
+            { "fieldId": "state", "fieldValue": "RUNNING" }
+          ]
+        },
+        "operation": "create",
+        "tableId": "workflow_run"
+      },
+      "position": [448, 300],
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1
+    },
+    {
+      "credentials": {
+        "supabaseApi": {
+          "id": "fQXC9iR0pHJF63Ir",
+          "name": "linkedin_automation"
+        }
+      },
+      "id": "insert_step_llm",
+      "name": "Insert Step Run - LLM Gateway Check",
+      "parameters": {
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "workflow_run_id", "fieldValue": "={{ $('Insert Workflow Run').item.json.id }}" },
+            { "fieldId": "trace_id", "fieldValue": "={{ $('Generate Trace ID').item.json.trace_id }}" },
+            { "fieldId": "step_name", "fieldValue": "llm_gateway_check" },
+            { "fieldId": "state", "fieldValue": "RUNNING" },
+            { "fieldId": "provider", "fieldValue": "openrouter" }
+          ]
+        },
+        "operation": "create",
+        "tableId": "workflow_step_run"
+      },
+      "position": [672, 300],
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1
+    },
+    {
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "2r45mRbFEEcjJVRD",
+          "name": "openrouter"
+        }
+      },
+      "id": "call_llm",
+      "name": "Call LLM Gateway (OpenRouter)",
+      "notes": "Uses existing 'openrouter' HTTP Header Auth credential. Model nvidia/nemotron-3.5-lightning:free (free tier, near-zero cost). max_tokens capped at 5.",
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "jsonBody": "={{ { \"model\": \"nvidia/nemotron-3.5-lightning:free\", \"max_tokens\": 5, \"messages\": [ { \"role\": \"user\", \"content\": \"Reply with exactly the single word: OK\" } ] } }}",
+        "method": "POST",
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "url": "https://openrouter.ai/api/v1/chat/completions"
+      },
+      "position": [896, 300],
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3
+    },
+    {
+      "credentials": {
+        "supabaseApi": {
+          "id": "fQXC9iR0pHJF63Ir",
+          "name": "linkedin_automation"
+        }
+      },
+      "id": "update_step_llm",
+      "name": "Complete Step Run - LLM Gateway Check",
+      "parameters": {
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "state", "fieldValue": "COMPLETED" },
+            { "fieldId": "finished_at", "fieldValue": "={{ $now.toISO() }}" }
+          ]
+        },
+        "filterType": "manual",
+        "filters": {
+          "conditions": [
+            { "condition": "eq", "keyName": "id", "keyValue": "={{ $('Insert Step Run - LLM Gateway Check').item.json.id }}" }
+          ]
+        },
+        "matchType": "allFilters",
+        "operation": "update",
+        "tableId": "workflow_step_run"
+      },
+      "position": [1120, 300],
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1
+    },
+    {
+      "credentials": {
+        "supabaseApi": {
+          "id": "fQXC9iR0pHJF63Ir",
+          "name": "linkedin_automation"
+        }
+      },
+      "id": "insert_step_rust",
+      "name": "Insert Step Run - Rust Tool Invocation",
+      "parameters": {
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "workflow_run_id", "fieldValue": "={{ $('Insert Workflow Run').item.json.id }}" },
+            { "fieldId": "trace_id", "fieldValue": "={{ $('Generate Trace ID').item.json.trace_id }}" },
+            { "fieldId": "step_name", "fieldValue": "rust_tool_invocation" },
+            { "fieldId": "state", "fieldValue": "RUNNING" },
+            { "fieldId": "provider", "fieldValue": "clitools/health" }
+          ]
+        },
+        "operation": "create",
+        "tableId": "workflow_step_run"
+      },
+      "position": [1344, 300],
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1
+    },
+    {
+      "id": "exec_rust_tool",
+      "name": "Invoke Rust Tool (Expected to Fail)",
+      "notes": "EXPECTED TO FAIL: the n8n host has no access to this project's compiled clitools binary. onError=continueRegularOutput so the workflow proceeds to record the failure in workflow_step_run. Do not attempt to make this succeed by installing Rust on the n8n host or exposing local infra.",
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "command": "./clitools/health/target/release/health"
+      },
+      "position": [1568, 300],
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1
+    },
+    {
+      "credentials": {
+        "supabaseApi": {
+          "id": "fQXC9iR0pHJF63Ir",
+          "name": "linkedin_automation"
+        }
+      },
+      "id": "update_step_rust",
+      "name": "Fail Step Run - Rust Tool Invocation",
+      "parameters": {
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "state", "fieldValue": "FAILED" },
+            { "fieldId": "error_code", "fieldValue": "ACCESS_PENDING" },
+            { "fieldId": "error_message", "fieldValue": "n8n host has no access to a compiled clitools binary; needs deployment path (HTTP wrapper or host-local binary) -- tracked as Phase 0B ACCESS_PENDING gate" },
+            { "fieldId": "finished_at", "fieldValue": "={{ $now.toISO() }}" }
+          ]
+        },
+        "filterType": "manual",
+        "filters": {
+          "conditions": [
+            { "condition": "eq", "keyName": "id", "keyValue": "={{ $('Insert Step Run - Rust Tool Invocation').item.json.id }}" }
+          ]
+        },
+        "matchType": "allFilters",
+        "operation": "update",
+        "tableId": "workflow_step_run"
+      },
+      "position": [1792, 300],
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1
+    },
+    {
+      "credentials": {
+        "supabaseApi": {
+          "id": "fQXC9iR0pHJF63Ir",
+          "name": "linkedin_automation"
+        }
+      },
+      "id": "complete_workflow_run",
+      "name": "Complete Workflow Run",
+      "parameters": {
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "state", "fieldValue": "COMPLETED" },
+            { "fieldId": "finished_at", "fieldValue": "={{ $now.toISO() }}" }
+          ]
+        },
+        "filterType": "manual",
+        "filters": {
+          "conditions": [
+            { "condition": "eq", "keyName": "id", "keyValue": "={{ $('Insert Workflow Run').item.json.id }}" }
+          ]
+        },
+        "matchType": "allFilters",
+        "operation": "update",
+        "tableId": "workflow_run"
+      },
+      "position": [2016, 300],
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "index": 0, "node": "Generate Trace ID", "type": "main" }]]
+    },
+    "Generate Trace ID": {
+      "main": [[{ "index": 0, "node": "Insert Workflow Run", "type": "main" }]]
+    },
+    "Insert Workflow Run": {
+      "main": [[{ "index": 0, "node": "Insert Step Run - LLM Gateway Check", "type": "main" }]]
+    },
+    "Insert Step Run - LLM Gateway Check": {
+      "main": [[{ "index": 0, "node": "Call LLM Gateway (OpenRouter)", "type": "main" }]]
+    },
+    "Call LLM Gateway (OpenRouter)": {
+      "main": [[{ "index": 0, "node": "Complete Step Run - LLM Gateway Check", "type": "main" }]]
+    },
+    "Complete Step Run - LLM Gateway Check": {
+      "main": [[{ "index": 0, "node": "Insert Step Run - Rust Tool Invocation", "type": "main" }]]
+    },
+    "Insert Step Run - Rust Tool Invocation": {
+      "main": [[{ "index": 0, "node": "Invoke Rust Tool (Expected to Fail)", "type": "main" }]]
+    },
+    "Invoke Rust Tool (Expected to Fail)": {
+      "main": [[{ "index": 0, "node": "Fail Step Run - Rust Tool Invocation", "type": "main" }]]
+    },
+    "Fail Step Run - Rust Tool Invocation": {
+      "main": [[{ "index": 0, "node": "Complete Workflow Run", "type": "main" }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true
+  }
+}
