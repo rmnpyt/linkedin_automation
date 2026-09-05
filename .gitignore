@@ -1,0 +1,56 @@
+# --- Secrets & environment ---
+.env
+.env.*
+!.env.example
+*.local
+secrets/
+*.secret
+*.key
+*.pem
+*.pfx
+*.session
+*.cookie
+*.cookies.json
+
+# --- Rust ---
+target/
+**/target/
+Cargo.lock.bak
+*.pdb
+
+# --- Node / tooling (MCP servers, scripts) ---
+node_modules/
+npm-debug.log*
+yarn-error.log*
+dist/
+build/
+
+# --- Supabase local dev ---
+supabase/.branches/
+supabase/.temp/
+supabase/logs/
+
+# --- Test / coverage / cache ---
+coverage/
+.tmp/
+tmp/
+.cache/
+*.tsbuildinfo
+
+# --- Python (n8n Code-node scratch scripts only) ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# --- Editor / OS / runtime junk ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.log
+
+# --- PowerShell transcripts / local session artifacts ---
+powershell/**/*.transcript.txt
+powershell/**/*.session.json
