@@ -3,6 +3,22 @@
 version = 4
 
 [[package]]
+name = "campaign_policy"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "harvestapi_normalize"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "health"
 version = "0.1.0"
 dependencies = [
