@@ -41,16 +41,14 @@ struct HealthResult {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(tag = "outcome")]
+#[serde(untagged)]
 enum ToolOutput {
-    #[serde(rename = "ok")]
     Ok {
         ok: bool,
         tool: &'static str,
         version: &'static str,
         result: HealthResult,
     },
-    #[serde(rename = "error")]
     Err {
         ok: bool,
         tool: &'static str,
