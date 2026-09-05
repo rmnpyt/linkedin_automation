@@ -35,7 +35,9 @@ comment on table campaign_budget_reservation is
 -- (max_total_campaign_cost_usd), since every operation type is campaign-attributable
 -- (CONTRACT.md sec.32). Returns the new reservation id, or NULL if either limit would be
 -- exceeded (the caller must not proceed with the paid operation in that case). A missing
--- (null) limit in budget_policy means that dimension is uncapped.
+-- (null) limit in budget_policy means that dimension is uncapped. Committed spend is
+-- aggregated across every CampaignRevision belonging to the same Campaign, not just the
+-- requesting revision -- see the campaign-wide-spend comment in the function body.
 create or replace function reserve_campaign_budget(
   p_campaign_revision_id uuid,
   p_budget_type text,
@@ -62,15 +64,30 @@ begin
     raise exception 'requested_amount_usd must be >= 0, got %', p_requested_amount_usd;
   end if;
 
-  perform pg_advisory_xact_lock(hashtextextended(p_campaign_revision_id::text, 0));
-
-  select campaign_id, budget_policy into v_campaign_id, v_policy
+  -- Read campaign_id first (unlocked -- a revision's campaign_id FK never changes after
+  -- creation, so this is safe without a lock), then lock and aggregate spend by
+  -- campaign_id rather than campaign_revision_id. CONTRACT.md sec.14 forces a new
+  -- CampaignRevision on ANY material rule change, not only a budget-policy change, and
+  -- sec.30 requires hard budgets to remain enforceable ("MUST NOT allow an effectively
+  -- unbounded paid search by accident") -- scoping spend to one revision would let every
+  -- unrelated revision bump (e.g. a qualification-threshold tweak) silently reset the
+  -- campaign's spend counters to zero, making the cap trivially bypassable. Limits
+  -- themselves still come from the CURRENT (requesting) revision's budget_policy, since
+  -- that reflects the operator's active configuration; only the committed-spend
+  -- aggregation is campaign-wide.
+  select campaign_id into v_campaign_id
   from campaign_revision
   where id = p_campaign_revision_id;
 
   if not found then
     raise exception 'campaign_revision % not found', p_campaign_revision_id;
   end if;
+
+  perform pg_advisory_xact_lock(hashtextextended(v_campaign_id::text, 0));
+
+  select budget_policy into v_policy
+  from campaign_revision
+  where id = p_campaign_revision_id;
 
   v_type_limit := case p_budget_type
     when 'SEARCH' then (v_policy ->> 'max_search_cost_usd')::numeric
@@ -88,7 +105,7 @@ begin
   ), 0)
   into v_type_committed
   from campaign_budget_reservation
-  where campaign_revision_id = p_campaign_revision_id
+  where campaign_id = v_campaign_id
     and budget_type = p_budget_type;
 
   select coalesce(sum(
@@ -100,7 +117,7 @@ begin
   ), 0)
   into v_total_committed
   from campaign_budget_reservation
-  where campaign_revision_id = p_campaign_revision_id;
+  where campaign_id = v_campaign_id;
 
   if v_type_limit is not null and v_type_committed + p_requested_amount_usd > v_type_limit then
     return null;

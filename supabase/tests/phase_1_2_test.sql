@@ -5,7 +5,7 @@
 
 begin;
 
-select plan(26);
+select plan(27);
 
 -- Fixtures shared by every test group below.
 insert into operator (id, display_name) values
@@ -36,8 +36,15 @@ select isnt(
 );
 
 -- === Budget reservation: type-limit blocking (revision A) ===
+-- Each budget test group below gets its OWN campaign: since committed spend now correctly
+-- aggregates by campaign_id (not campaign_revision_id -- see the campaign-wide-spend
+-- regression test near the end of this file), reusing one campaign across these
+-- otherwise-independent groups would make them interfere with each other's committed
+-- totals.
+insert into campaign (id, operator_id, name) values
+  ('10000000-0000-0000-0000-000000000003', '10000000-0000-0000-0000-000000000001', 'Budget Test Campaign A');
 insert into campaign_revision (id, campaign_id, version, budget_policy) values (
-  '10000000-0000-0000-0000-000000000020', '10000000-0000-0000-0000-000000000002', 2,
+  '10000000-0000-0000-0000-000000000020', '10000000-0000-0000-0000-000000000003', 2,
   '{"max_search_cost_usd": 5, "max_total_campaign_cost_usd": 100}'::jsonb
 );
 -- 6: a within-limit reservation succeeds.
@@ -73,8 +80,10 @@ select ok(
 );
 
 -- === Budget reservation: total-limit blocking even when the type limit alone would allow it (revision B) ===
+insert into campaign (id, operator_id, name) values
+  ('10000000-0000-0000-0000-000000000004', '10000000-0000-0000-0000-000000000001', 'Budget Test Campaign B');
 insert into campaign_revision (id, campaign_id, version, budget_policy) values (
-  '10000000-0000-0000-0000-000000000021', '10000000-0000-0000-0000-000000000002', 3,
+  '10000000-0000-0000-0000-000000000021', '10000000-0000-0000-0000-000000000004', 3,
   '{"max_search_cost_usd": 100, "max_total_campaign_cost_usd": 5}'::jsonb
 );
 -- 10: within total limit succeeds.
@@ -92,8 +101,10 @@ select is(
 );
 
 -- === Releasing an unused reservation frees its committed amount ===
+insert into campaign (id, operator_id, name) values
+  ('10000000-0000-0000-0000-000000000005', '10000000-0000-0000-0000-000000000001', 'Budget Test Campaign C');
 insert into campaign_revision (id, campaign_id, version, budget_policy) values (
-  '10000000-0000-0000-0000-000000000022', '10000000-0000-0000-0000-000000000002', 4,
+  '10000000-0000-0000-0000-000000000022', '10000000-0000-0000-0000-000000000005', 4,
   '{"max_search_cost_usd": 5, "max_total_campaign_cost_usd": 5}'::jsonb
 );
 do $$
@@ -115,8 +126,10 @@ select ok(
 -- RESERVED (never settled/released) 5-unit SEARCH reservation. Reusing it here would
 -- correctly (and confusingly, for a guard-rail test) get blocked by the total-campaign
 -- limit rather than exercising the "double settle" guard rail this test actually wants.
+insert into campaign (id, operator_id, name) values
+  ('10000000-0000-0000-0000-000000000006', '10000000-0000-0000-0000-000000000001', 'Budget Test Campaign D');
 insert into campaign_revision (id, campaign_id, version, budget_policy) values (
-  '10000000-0000-0000-0000-000000000023', '10000000-0000-0000-0000-000000000002', 5,
+  '10000000-0000-0000-0000-000000000023', '10000000-0000-0000-0000-000000000006', 5,
   '{"max_search_cost_usd": 100, "max_total_campaign_cost_usd": 100}'::jsonb
 );
 -- 13: settling a reservation that does not exist raises.
@@ -240,6 +253,33 @@ select throws_ok(
        '10000000-0000-0000-0000-000000000042', '10000000-0000-0000-0000-000000000052'
      ) $$,
   'P0001', null, 'a candidate beyond max_unique_candidates is rejected even for a distinct new person'
+);
+
+-- Regression (independent review finding): committed spend aggregates across the WHOLE
+-- Campaign, not just the requesting revision -- an unrelated revision bump (CONTRACT.md
+-- sec.14 forces one on ANY material change, not only a budget-policy change) must not
+-- silently reset the spend counter to zero, which would make a hard cap bypassable
+-- (CONTRACT.md sec.30).
+insert into campaign (id, operator_id, name) values
+  ('10000000-0000-0000-0000-000000000060', '10000000-0000-0000-0000-000000000001', 'Campaign-Wide Budget Test Campaign');
+insert into campaign_revision (id, campaign_id, version, budget_policy) values (
+  '10000000-0000-0000-0000-000000000061', '10000000-0000-0000-0000-000000000060', 1,
+  '{"max_search_cost_usd": 5, "max_total_campaign_cost_usd": 100}'::jsonb
+);
+select reserve_campaign_budget('10000000-0000-0000-0000-000000000061', 'SEARCH', 4, 'trace-f1');
+-- A new revision for the SAME campaign (e.g. an unrelated field changed); budget_policy
+-- carries the same max_search_cost_usd forward unchanged.
+insert into campaign_revision (id, campaign_id, version, budget_policy) values (
+  '10000000-0000-0000-0000-000000000062', '10000000-0000-0000-0000-000000000060', 2,
+  '{"max_search_cost_usd": 5, "max_total_campaign_cost_usd": 100}'::jsonb
+);
+-- 25: a request that fits within the NEW revision's own (unused) allotment, but would
+-- exceed the campaign's true combined spend (4 already committed + 2 requested = 6 > 5),
+-- is correctly refused.
+select is(
+  reserve_campaign_budget('10000000-0000-0000-0000-000000000062', 'SEARCH', 2, 'trace-f2'),
+  null,
+  'spend committed under an earlier revision of the same campaign still counts against a later revision''s limit'
 );
 
 select * from finish();

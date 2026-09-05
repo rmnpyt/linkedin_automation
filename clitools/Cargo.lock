@@ -11,6 +11,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "contact_enrichment_normalize"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "enrichment_policy"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "harvestapi_normalize"
 version = "0.1.0"
 dependencies = [
