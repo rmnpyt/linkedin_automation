@@ -11,6 +11,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "connection_sender_normalize"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "contact_enrichment_normalize"
 version = "0.1.0"
 dependencies = [
