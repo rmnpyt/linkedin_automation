@@ -1,0 +1,140 @@
+{
+  "name": "Connection Automation - Apify Search",
+  "active": false,
+  "nodes": [
+    {
+      "id": "trigger",
+      "name": "Manual Trigger",
+      "parameters": {},
+      "position": [0, 304],
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1
+    },
+    {
+      "id": "set_campaign_id",
+      "name": "Campaign To Search",
+      "notes": "Edit campaign_id to the real campaign row you want to search for before running.",
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "1", "name": "campaign_id", "type": "string", "value": "PASTE-CAMPAIGN-ID-HERE" }
+          ]
+        },
+        "options": {}
+      },
+      "position": [224, 304],
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4
+    },
+    {
+      "id": "get_campaign",
+      "name": "Get Campaign",
+      "notes": "Attach a Supabase credential (Project URL + service_role key). LEGACY: reads a `campaign` table shape that predates the current schema.",
+      "parameters": {
+        "filters": { "conditions": [{ "keyName": "id", "keyValue": "={{ $json.campaign_id }}" }] },
+        "operation": "get",
+        "tableId": "campaign"
+      },
+      "position": [448, 304],
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1
+    },
+    {
+      "id": "build_search_params",
+      "name": "Build Search Params",
+      "notes": "Attach an HTTP Header Auth credential named 'OpenRouter' (Authorization: Bearer <key>). Model: nvidia/nemotron-3.5-lightning:free (mistral's free tier was deprecated).",
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "jsonBody": "={{ { \"model\": \"nvidia/nemotron-3.5-lightning:free\", \"messages\": [ { \"role\": \"system\", \"content\": \"You translate a plain-English LinkedIn search goal into search parameters for a profile-search tool. Output ONLY valid JSON in exactly this shape: {\\\"searchQuery\\\": \\\"short keyword phrase capturing the core topic\\\", \\\"locations\\\": [\\\"city or region name(s) mentioned, empty array if none\\\"], \\\"currentJobTitles\\\": [\\\"likely job title(s) implied by the goal, empty array if none\\\"], \\\"maxItems\\\": 25}. Keep arrays short (1-3 entries), plain strings a LinkedIn search would recognize. No other keys, no prose.\" }, { \"role\": \"user\", \"content\": \"Search goal: \" + $json.search_goal } ], \"response_format\": { \"type\": \"json_object\" } } }}",
+        "method": "POST",
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "url": "https://openrouter.ai/api/v1/chat/completions"
+      },
+      "position": [672, 304],
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3
+    },
+    {
+      "id": "parse_params",
+      "name": "Parse Search Params",
+      "parameters": {
+        "jsCode": "const content = $json.choices[0].message.content;\nconst parsed = typeof content === 'string' ? JSON.parse(content) : content;\nreturn {\n  json: {\n    campaign_id: $('Get Campaign').item.json.id,\n    search_params: parsed\n  }\n};",
+        "mode": "runOnceForEachItem"
+      },
+      "position": [880, 304],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "call_apify",
+      "name": "Search Apify",
+      "notes": "Attach an HTTP Header Auth credential named 'Apify' (Authorization: Bearer <Apify API token>). Runs harvestapi/linkedin-profile-search synchronously and returns dataset items directly (see RESEARCH-NOTES.md for why this actor was picked).",
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "jsonBody": "={{ { \"searchQuery\": $json.search_params.searchQuery, \"locations\": $json.search_params.locations, \"currentJobTitles\": $json.search_params.currentJobTitles, \"maxItems\": $json.search_params.maxItems || 25 } }}",
+        "method": "POST",
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "url": "https://api.apify.com/v2/acts/harvestapi~linkedin-profile-search/run-sync-get-dataset-items"
+      },
+      "position": [1104, 304],
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3
+    },
+    {
+      "id": "normalize_profiles",
+      "name": "Normalize Profiles",
+      "notes": "Confirmed against a real run (2026-08-28): harvestapi's linkedinUrl/fullName-fallback/headline mappings were already correct. location needed a fix - it comes back as an object ({linkedinText, countryCode, parsed}), not a string; now extracts linkedinText. raw_data always keeps the full original item regardless.",
+      "parameters": {
+        "jsCode": "const inputItems = $input.all();\nlet profiles = [];\nfor (const it of inputItems) {\n  if (Array.isArray(it.json)) {\n    profiles.push(...it.json);\n  } else {\n    profiles.push(it.json);\n  }\n}\n\nconst campaignId = $('Parse Search Params').first().json.campaign_id;\n\nfunction extractLocation(p) {\n  if (!p.location) return null;\n  if (typeof p.location === 'string') return p.location;\n  return p.location.linkedinText || (p.location.parsed && p.location.parsed.text) || null;\n}\n\nreturn profiles.map(p => ({\n  json: {\n    campaign_id: campaignId,\n    linkedin_url: p.linkedinUrl || p.profileUrl || p.publicIdentifier || p.url || '',\n    full_name: p.fullName || [p.firstName, p.lastName].filter(Boolean).join(' ') || null,\n    headline: p.headline || null,\n    location: extractLocation(p),\n    source: 'apify',\n    raw_data: p\n  }\n}));"
+      },
+      "position": [1328, 304],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "save_profiles",
+      "name": "Save Profiles",
+      "notes": "One row per found profile. LEGACY: writes to a `profile` table that predates the current person/external_profile/profile_snapshot schema.",
+      "parameters": {
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "campaign_id", "fieldValue": "={{ $json.campaign_id }}" },
+            { "fieldId": "linkedin_url", "fieldValue": "={{ $json.linkedin_url }}" },
+            { "fieldId": "full_name", "fieldValue": "={{ $json.full_name }}" },
+            { "fieldId": "headline", "fieldValue": "={{ $json.headline }}" },
+            { "fieldId": "location", "fieldValue": "={{ $json.location }}" },
+            { "fieldId": "source", "fieldValue": "={{ $json.source }}" },
+            { "fieldId": "raw_data", "fieldValue": "={{ JSON.stringify($json.raw_data) }}" }
+          ]
+        },
+        "tableId": "profile"
+      },
+      "position": [1552, 304],
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1
+    }
+  ],
+  "connections": {
+    "Build Search Params": { "main": [[{ "index": 0, "node": "Parse Search Params", "type": "main" }]] },
+    "Campaign To Search": { "main": [[{ "index": 0, "node": "Get Campaign", "type": "main" }]] },
+    "Get Campaign": { "main": [[{ "index": 0, "node": "Build Search Params", "type": "main" }]] },
+    "Manual Trigger": { "main": [[{ "index": 0, "node": "Campaign To Search", "type": "main" }]] },
+    "Normalize Profiles": { "main": [[{ "index": 0, "node": "Save Profiles", "type": "main" }]] },
+    "Parse Search Params": { "main": [[{ "index": 0, "node": "Search Apify", "type": "main" }]] },
+    "Search Apify": { "main": [[{ "index": 0, "node": "Normalize Profiles", "type": "main" }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "binaryMode": "separate"
+  }
+}

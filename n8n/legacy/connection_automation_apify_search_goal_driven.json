@@ -1,0 +1,366 @@
+{
+  "name": "Connection Automation - Apify Search (Goal-Driven)",
+  "active": false,
+  "nodes": [
+    {
+      "id": "trigger",
+      "name": "On Campaign Run",
+      "notes": "Test manually by running with input JSON: {\"campaign_id\": \"<real campaign id>\"}. Also the target of the self-recursive 'Continue Loop' node at the end.",
+      "parameters": { "inputSource": "passthrough" },
+      "position": [0, 304],
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1
+    },
+    {
+      "id": "get_campaign",
+      "name": "Get Campaign",
+      "parameters": {
+        "filters": { "conditions": [{ "keyName": "id", "keyValue": "={{ $json.campaign_id }}" }] },
+        "operation": "get",
+        "tableId": "campaign"
+      },
+      "position": [224, 304],
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1
+    },
+    {
+      "id": "count_profiles",
+      "name": "Count Existing Profiles",
+      "notes": "alwaysOutputData: true - a fresh campaign has zero existing profiles, and n8n skips downstream nodes entirely when a node's input is zero items (this was the actual bug that stopped the chain here). With this on, the node emits one empty placeholder item instead of none; Check Goal filters that placeholder out by checking for a real 'id' field. LEGACY: reads a `profile` table that predates the current schema (campaign_candidate/profile_snapshot in the current design).",
+      "alwaysOutputData": true,
+      "parameters": {
+        "filters": { "conditions": [{ "condition": "eq", "keyName": "campaign_id", "keyValue": "={{ $json.id }}" }] },
+        "matchType": "allFilters",
+        "operation": "getAll",
+        "returnAll": true,
+        "tableId": "profile"
+      },
+      "position": [448, 304],
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1
+    },
+    {
+      "id": "check_goal",
+      "name": "Check Goal",
+      "notes": "LEGACY: campaign-wide stop-reason precedence (target count / budget / exhausted / safety cap) is now implemented and tested in Rust as clitools/campaign_policy (17 tests), not here.",
+      "parameters": {
+        "jsCode": "const campaign = $('Get Campaign').first().json;\nconst existingCount = $input.all().filter(it => it.json && it.json.id).length;\n\nconst goalMet = campaign.target_profile_count != null && existingCount >= campaign.target_profile_count;\nconst budgetMet = campaign.max_budget_usd != null && campaign.spent_usd >= campaign.max_budget_usd;\nconst exhausted = campaign.search_exhausted === true;\nconst safetyCap = campaign.next_search_page >= 200;\n\nif (goalMet || budgetMet || exhausted || safetyCap) {\n  return [];\n}\n\nreturn [{\n  json: {\n    campaign_id: campaign.id,\n    search_goal: campaign.search_goal,\n    target_profile_count: campaign.target_profile_count,\n    max_budget_usd: campaign.max_budget_usd,\n    spent_usd: campaign.spent_usd,\n    next_search_page: campaign.next_search_page\n  }\n}];"
+      },
+      "position": [672, 304],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "build_params",
+      "name": "Build Search Params",
+      "notes": "Model: nvidia/nemotron-3-ultra-550b-a55b:free (confirmed working by user 2026-08-28, after nemotron-3.5-lightning failed twice with different provider-side errors - a 504 timeout, then a 404). 120s timeout (Ultra is a much larger/slower model than Lightning) + 1 retry.",
+      "maxTries": 2,
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "jsonBody": "={{ { \"model\": \"nvidia/nemotron-3-ultra-550b-a55b:free\", \"messages\": [ { \"role\": \"system\", \"content\": \"You translate a plain-English LinkedIn search goal into search parameters for a profile-search tool. Output ONLY valid JSON in exactly this shape: {\\\"searchQuery\\\": \\\"short keyword phrase capturing the core topic\\\", \\\"locations\\\": [\\\"city or region name(s) mentioned, empty array if none\\\"], \\\"currentJobTitles\\\": [\\\"likely job title(s) implied by the goal, empty array if none\\\"]}. Keep arrays short (1-3 entries), plain strings a LinkedIn search would recognize. No other keys, no prose.\" }, { \"role\": \"user\", \"content\": \"Search goal: \" + $json.search_goal } ], \"response_format\": { \"type\": \"json_object\" } } }}",
+        "method": "POST",
+        "options": { "timeout": 120000 },
+        "sendBody": true,
+        "specifyBody": "json",
+        "url": "https://openrouter.ai/api/v1/chat/completions"
+      },
+      "position": [880, 304],
+      "retryOnFail": true,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "id": "parse_params",
+      "name": "Parse Search Params",
+      "notes": "Checks for an error response (e.g. a provider timeout/404) before assuming choices[0] exists, and throws a clear message instead of a cryptic crash.",
+      "parameters": {
+        "jsCode": "if ($json.error) {\n  throw new Error('OpenRouter request failed: ' + ($json.error.message || JSON.stringify($json.error)));\n}\nif (!$json.choices || !$json.choices[0]) {\n  throw new Error('Unexpected OpenRouter response shape: ' + JSON.stringify($json));\n}\nconst content = $json.choices[0].message.content;\nconst parsed = typeof content === 'string' ? JSON.parse(content) : content;\nconst state = $('Check Goal').first().json;\nreturn {\n  json: {\n    ...state,\n    search_params: parsed\n  }\n};",
+        "mode": "runOnceForEachItem"
+      },
+      "position": [1104, 304],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "search_page",
+      "name": "Search Page",
+      "notes": "alwaysOutputData: true - a page with zero matching results (search exhausted) must still flow through so Extract Candidates can record that and the loop can stop cleanly, instead of the chain just silently dying here. 120s timeout + 1 retry. maxItems capped at 10 (2026-08-29): Apify free-tier plan rejects Enrich New calls over 10 URLs per run ('Free users are limited to 10 items per run') - capping discovery at 10/page keeps every page's new-candidate batch under that limit. Raise this back to 25 once Apify billing is upgraded.",
+      "alwaysOutputData": true,
+      "maxTries": 2,
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "jsonBody": "={{ { \"searchQuery\": $json.search_params.searchQuery, \"locations\": $json.search_params.locations, \"currentJobTitles\": $json.search_params.currentJobTitles, \"maxItems\": 10, \"startPage\": $json.next_search_page, \"takePages\": 1, \"profileScraperMode\": \"Short\" } }}",
+        "method": "POST",
+        "options": { "timeout": 120000 },
+        "sendBody": true,
+        "specifyBody": "json",
+        "url": "https://api.apify.com/v2/acts/harvestapi~linkedin-profile-search/run-sync-get-dataset-items"
+      },
+      "position": [1328, 304],
+      "retryOnFail": true,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "id": "extract_candidates",
+      "name": "Extract Candidates",
+      "notes": "LEGACY: HarvestAPI item normalization (URL canonicalization, field mapping) is now implemented and tested in Rust as clitools/harvestapi_normalize (19 tests).",
+      "parameters": {
+        "jsCode": "const state = $('Parse Search Params').first().json;\nconst rawResults = $input.all().map(it => it.json).filter(p => p && (p.linkedinUrl || p.profileUrl || p.publicIdentifier || p.url));\n\nconst extractLocation = (p) => (!p.location) ? null : (typeof p.location === 'string' ? p.location : (p.location.linkedinText || (p.location.parsed && p.location.parsed.text) || null));\n\nconst candidates = rawResults.map(p => ({\n  linkedin_url: p.linkedinUrl || p.profileUrl || p.publicIdentifier || p.url || '',\n  full_name: p.fullName || [p.firstName, p.lastName].filter(Boolean).join(' ') || null,\n  headline: p.headline || null,\n  location: extractLocation(p)\n})).filter(c => c.linkedin_url);\n\nreturn [{\n  json: {\n    ...state,\n    candidates\n  }\n}];"
+      },
+      "position": [1552, 304],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "dedup_lookup",
+      "name": "Dedup Lookup",
+      "notes": "alwaysOutputData: true - most pages will have zero already-known duplicates, and the chain must not die here just because there's nothing to dedupe. LEGACY: dedup-by-URL against a `profile` table that predates the current external_profile/campaign_candidate schema.",
+      "alwaysOutputData": true,
+      "parameters": {
+        "filterString": "={{ $json.candidates.length > 0 ? ('linkedin_url=in.(' + $json.candidates.map(c => '\"' + c.linkedin_url + '\"').join(',') + ')&email=not.is.null') : 'linkedin_url=eq.__none__' }}",
+        "filterType": "string",
+        "operation": "getAll",
+        "returnAll": true,
+        "tableId": "profile"
+      },
+      "position": [1760, 304],
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1
+    },
+    {
+      "id": "split_reuse_enrich",
+      "name": "Split Reuse vs Enrich",
+      "parameters": {
+        "jsCode": "const state = $('Extract Candidates').first().json;\nconst dedupMatches = $input.all().map(it => it.json).filter(m => m && m.linkedin_url);\nconst matchedByUrl = {};\nfor (const m of dedupMatches) {\n  matchedByUrl[m.linkedin_url] = m;\n}\n\nconst reuseList = [];\nconst enrichList = [];\nfor (const c of state.candidates) {\n  const m = matchedByUrl[c.linkedin_url];\n  if (m) {\n    reuseList.push({ ...c, email: m.email, raw_data: m.raw_data });\n  } else {\n    enrichList.push(c);\n  }\n}\n\nreturn [{\n  json: {\n    ...state,\n    reuseList,\n    enrichList\n  }\n}];"
+      },
+      "position": [1984, 304],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "has_reused",
+      "name": "Has Reused?",
+      "notes": "Mirrors 'Has New Profiles?' below - only runs Expand/Save when there's actually something to reuse.",
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "cond1",
+              "leftValue": "={{ $json.reuseList.length }}",
+              "operator": { "operation": "gt", "type": "number" },
+              "rightValue": 0
+            }
+          ],
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 }
+        },
+        "options": {}
+      },
+      "position": [2112, 304],
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2
+    },
+    {
+      "id": "expand_reuse",
+      "name": "Expand Reuse Items",
+      "parameters": {
+        "jsCode": "const state = $json;\nreturn state.reuseList.map(r => ({\n  json: {\n    campaign_id: state.campaign_id,\n    linkedin_url: r.linkedin_url,\n    full_name: r.full_name,\n    headline: r.headline,\n    location: r.location,\n    email: r.email,\n    source: 'apify-reused',\n    raw_data: r.raw_data\n  }\n}));"
+      },
+      "position": [2320, 192],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "save_reused",
+      "name": "Save Reused Profiles",
+      "parameters": {
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "campaign_id", "fieldValue": "={{ $json.campaign_id }}" },
+            { "fieldId": "linkedin_url", "fieldValue": "={{ $json.linkedin_url }}" },
+            { "fieldId": "full_name", "fieldValue": "={{ $json.full_name }}" },
+            { "fieldId": "headline", "fieldValue": "={{ $json.headline }}" },
+            { "fieldId": "location", "fieldValue": "={{ $json.location }}" },
+            { "fieldId": "email", "fieldValue": "={{ $json.email }}" },
+            { "fieldId": "source", "fieldValue": "={{ $json.source }}" },
+            { "fieldId": "raw_data", "fieldValue": "={{ JSON.stringify($json.raw_data) }}" }
+          ]
+        },
+        "tableId": "profile"
+      },
+      "position": [2544, 192],
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1
+    },
+    {
+      "id": "after_reuse",
+      "name": "After Reuse",
+      "parameters": { "jsCode": "return [{ json: $('Split Reuse vs Enrich').first().json }];" },
+      "position": [2768, 192],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "has_new",
+      "name": "Has New Profiles?",
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "cond1",
+              "leftValue": "={{ $json.enrichList.length }}",
+              "operator": { "operation": "gt", "type": "number" },
+              "rightValue": 0
+            }
+          ],
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 }
+        },
+        "options": {}
+      },
+      "position": [2992, 304],
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2
+    },
+    {
+      "id": "enrich_new",
+      "name": "Enrich New",
+      "notes": "alwaysOutputData: true - guards against the (rare) case where the actor fails to return results for every requested URL. 180s timeout + 1 retry. This is the paid HarvestAPI email-enrichment call CONTRACT.md sec.29-32 governs (clitools/enrichment_policy now decides eligibility and clitools/contact_enrichment_normalize now validates the result shape).",
+      "alwaysOutputData": true,
+      "maxTries": 2,
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "jsonBody": "={{ { \"urls\": $json.enrichList.map(c => c.linkedin_url), \"profileScraperMode\": \"Profile details + email search ($10 per 1k)\" } }}",
+        "method": "POST",
+        "options": { "timeout": 180000 },
+        "sendBody": true,
+        "specifyBody": "json",
+        "url": "https://api.apify.com/v2/acts/harvestapi~linkedin-profile-scraper/run-sync-get-dataset-items"
+      },
+      "position": [3200, 192],
+      "retryOnFail": true,
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "id": "normalize_enriched",
+      "name": "Normalize Enriched",
+      "notes": "FIXED (2026-08-29): now throws a clear error if any item from Enrich New is an {error: ...} response (e.g. Apify plan-limit rejection) instead of silently filtering it out - that silent filtering was exactly what caused the chain to stop with 0 items and no visible error. Still reads state from 'Split Reuse vs Enrich' (always executes exactly once).",
+      "parameters": {
+        "jsCode": "const items = $input.all();\nfor (const it of items) {\n  if (it.json && it.json.error) {\n    throw new Error('Enrich New failed: ' + (typeof it.json.error === 'string' ? it.json.error : JSON.stringify(it.json.error)));\n  }\n}\n\nconst state = $('Split Reuse vs Enrich').first().json;\nconst results = items.map(it => it.json).filter(p => p && (p.linkedinUrl || p.profileUrl || p.publicIdentifier || p.url));\n\nconst extractLocation = (p) => (!p.location) ? null : (typeof p.location === 'string' ? p.location : (p.location.linkedinText || (p.location.parsed && p.location.parsed.text) || null));\n\nreturn results.map(p => ({\n  json: {\n    campaign_id: state.campaign_id,\n    linkedin_url: p.linkedinUrl || p.profileUrl || p.publicIdentifier || p.url || '',\n    full_name: p.fullName || [p.firstName, p.lastName].filter(Boolean).join(' ') || null,\n    headline: p.headline || null,\n    location: extractLocation(p),\n    email: p.email || (Array.isArray(p.emails) && p.emails[0]) || null,\n    source: 'apify',\n    raw_data: p\n  }\n}));"
+      },
+      "position": [3424, 192],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "save_enriched",
+      "name": "Save Enriched Profiles",
+      "parameters": {
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "campaign_id", "fieldValue": "={{ $json.campaign_id }}" },
+            { "fieldId": "linkedin_url", "fieldValue": "={{ $json.linkedin_url }}" },
+            { "fieldId": "full_name", "fieldValue": "={{ $json.full_name }}" },
+            { "fieldId": "headline", "fieldValue": "={{ $json.headline }}" },
+            { "fieldId": "location", "fieldValue": "={{ $json.location }}" },
+            { "fieldId": "email", "fieldValue": "={{ $json.email }}" },
+            { "fieldId": "source", "fieldValue": "={{ $json.source }}" },
+            { "fieldId": "raw_data", "fieldValue": "={{ JSON.stringify($json.raw_data) }}" }
+          ]
+        },
+        "tableId": "profile"
+      },
+      "position": [3648, 192],
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1
+    },
+    {
+      "id": "after_enrich",
+      "name": "After Enrich",
+      "notes": "Also fixed to reference 'Split Reuse vs Enrich' instead of 'After Reuse', for the same reason as Normalize Enriched.",
+      "parameters": { "jsCode": "return [{ json: $('Split Reuse vs Enrich').first().json }];" },
+      "position": [3872, 304],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "update_state",
+      "name": "Update Campaign State",
+      "notes": "LEGACY: cost accounting and campaign search-state advancement are now the job of the Supabase RPC functions from Phase 1.2 (reserve_campaign_budget and related), which enforce campaign-wide (not revision-scoped) aggregation under a row lock -- this Code node has neither.",
+      "parameters": {
+        "jsCode": "const state = $input.first().json;\nconst reuseCount = state.reuseList.length;\nconst enrichCount = state.enrichList.length;\nconst cost = 0.10 + enrichCount * 0.01;\nconst newSpent = Math.round((state.spent_usd + cost) * 100) / 100;\nconst newNextPage = state.next_search_page + 1;\nconst newExhausted = state.candidates.length === 0;\n\nreturn [{\n  json: {\n    campaign_id: state.campaign_id,\n    spent_usd: newSpent,\n    next_search_page: newNextPage,\n    search_exhausted: newExhausted\n  }\n}];"
+      },
+      "position": [4080, 304],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "update_campaign",
+      "name": "Update Campaign",
+      "parameters": {
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "spent_usd", "fieldValue": "={{ $json.spent_usd }}" },
+            { "fieldId": "next_search_page", "fieldValue": "={{ $json.next_search_page }}" },
+            { "fieldId": "search_exhausted", "fieldValue": "={{ $json.search_exhausted }}" }
+          ]
+        },
+        "filters": { "conditions": [{ "condition": "eq", "keyName": "id", "keyValue": "={{ $json.campaign_id }}" }] },
+        "matchType": "allFilters",
+        "operation": "update",
+        "tableId": "campaign"
+      },
+      "position": [4304, 304],
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1
+    },
+    {
+      "id": "continue_loop",
+      "name": "Continue Loop",
+      "notes": "Self-reference: calls this same workflow again to continue the loop. If it errors, open this node in the UI and confirm the workflow picker shows this same workflow selected. The original instance id (pFvlSwOXibZp9Ck3) is not reusable after re-import -- rewire this node to the re-imported workflow's own id if this file is ever imported back into n8n.",
+      "parameters": { "options": {}, "workflowId": "pFvlSwOXibZp9Ck3" },
+      "position": [4528, 304],
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1
+    }
+  ],
+  "connections": {
+    "After Enrich": { "main": [[{ "index": 0, "node": "Update Campaign State", "type": "main" }]] },
+    "After Reuse": { "main": [[{ "index": 0, "node": "Has New Profiles?", "type": "main" }]] },
+    "Build Search Params": { "main": [[{ "index": 0, "node": "Parse Search Params", "type": "main" }]] },
+    "Check Goal": { "main": [[{ "index": 0, "node": "Build Search Params", "type": "main" }]] },
+    "Count Existing Profiles": { "main": [[{ "index": 0, "node": "Check Goal", "type": "main" }]] },
+    "Dedup Lookup": { "main": [[{ "index": 0, "node": "Split Reuse vs Enrich", "type": "main" }]] },
+    "Enrich New": { "main": [[{ "index": 0, "node": "Normalize Enriched", "type": "main" }]] },
+    "Expand Reuse Items": { "main": [[{ "index": 0, "node": "Save Reused Profiles", "type": "main" }]] },
+    "Extract Candidates": { "main": [[{ "index": 0, "node": "Dedup Lookup", "type": "main" }]] },
+    "Get Campaign": { "main": [[{ "index": 0, "node": "Count Existing Profiles", "type": "main" }]] },
+    "Has New Profiles?": { "main": [[{ "index": 0, "node": "Enrich New", "type": "main" }], [{ "index": 0, "node": "Update Campaign State", "type": "main" }]] },
+    "Has Reused?": { "main": [[{ "index": 0, "node": "Expand Reuse Items", "type": "main" }], [{ "index": 0, "node": "Has New Profiles?", "type": "main" }]] },
+    "Normalize Enriched": { "main": [[{ "index": 0, "node": "Save Enriched Profiles", "type": "main" }]] },
+    "On Campaign Run": { "main": [[{ "index": 0, "node": "Get Campaign", "type": "main" }]] },
+    "Parse Search Params": { "main": [[{ "index": 0, "node": "Search Page", "type": "main" }]] },
+    "Save Enriched Profiles": { "main": [[{ "index": 0, "node": "After Enrich", "type": "main" }]] },
+    "Save Reused Profiles": { "main": [[{ "index": 0, "node": "After Reuse", "type": "main" }]] },
+    "Search Page": { "main": [[{ "index": 0, "node": "Extract Candidates", "type": "main" }]] },
+    "Split Reuse vs Enrich": { "main": [[{ "index": 0, "node": "Has Reused?", "type": "main" }]] },
+    "Update Campaign": { "main": [[{ "index": 0, "node": "Continue Loop", "type": "main" }]] },
+    "Update Campaign State": { "main": [[{ "index": 0, "node": "Update Campaign", "type": "main" }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "binaryMode": "separate"
+  }
+}

@@ -1,0 +1,135 @@
+{
+  "name": "Connection Automation - KPI Scorer",
+  "active": false,
+  "nodes": [
+    {
+      "id": "trigger",
+      "name": "Manual Trigger",
+      "parameters": {},
+      "position": [0, 304],
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1
+    },
+    {
+      "id": "get_profiles",
+      "name": "Get Profiles To Score",
+      "notes": "Attach a Supabase credential (Project URL + service_role key). Pulls unscored profiles; real filtering to 'no score yet' is a refinement for later. LEGACY: reads a `profile` table that predates the current schema.",
+      "parameters": { "filterType": "none", "limit": 5, "operation": "getAll", "tableId": "profile" },
+      "position": [224, 304],
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1
+    },
+    {
+      "id": "get_campaign",
+      "name": "Get Campaign For Profile",
+      "notes": "Fetches the campaign row (search goal + KPI weights + hard-filter switches) for the profile from the previous node.",
+      "parameters": {
+        "filters": { "conditions": [{ "keyName": "id", "keyValue": "={{ $json.campaign_id }}" }] },
+        "operation": "get",
+        "tableId": "campaign"
+      },
+      "position": [448, 304],
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1
+    },
+    {
+      "id": "build_prompt",
+      "name": "Build Scoring Prompt",
+      "notes": "Builds the LLM system+user prompt from KPI-FRAMEWORK.md's rubric; carries campaign weights/switches forward to the composite-score step. LEGACY/ARCHITECTURE MISMATCH: this workflow computes the KPI composite score itself in the 'Compute Composite Score' Code node below (JS reweighting/hard-filter/seniority-floor logic). CONTRACT.md requires this arithmetic to live in the Rust `clitools/scoring` engine, never in n8n or an LLM. Do not reconnect or reuse this scoring logic as-is -- Phase 1.1 already reimplemented and tested it correctly in Rust.",
+      "parameters": {
+        "jsCode": "const campaign = $json;\nconst profile = $('Get Profiles To Score').item.json;\n\nconst systemPrompt = `You are a LinkedIn profile scorer. Given a search goal and a candidate's profile data, score the candidate on up to 6 KPIs, each 0-100, following these exact rules:\n\n1. field (weight 25%): quick, broad check of professional domain, using only headline, job title, industry, and top skills. 80-100 clearly in target field, 50-79 adjacent field, 20-49 weak signal, 0 no match.\n2. location (weight 20%): geographic fit from the profile location field. 100 target city/region, 90 same broader region, 40 neighboring region with ties, 0 elsewhere.\n3. role_seniority (weight 15%): does their role/seniority match the target role type, from job title, employer type, years in role. 90-100 exact senior match, 60-89 adjacent level, 30-59 junior/related, 0 unrelated.\n4. topic (weight 20%): a DEEP check into the About section, experience descriptions, publications, projects, and courses for the SPECIFIC topic in the search goal (not just the broad field). Any single real, explicit example is enough for 80-100, even if it is only one project among many. 50-79 topic appears in text but not as a clear explicit project. 20-49 related field only, no direct mention. 0 no mention.\n5. network_proximity (weight 10%, OMIT ENTIRELY if connection-degree or mutual-connection data is not present in the input - never guess or default this to 0): 90-100 2nd degree with 5+ mutuals, 60-89 2nd degree with 1-4 mutuals, 30-59 3rd degree with a shared school/group, 0-29 3rd+ degree with no shared context.\n6. activity (weight 10%): recency of posts/comments/reactions and profile signals. 80-100 active within 30 days, 50-79 within 90 days, 20-49 within a year, 0-19 dormant. SENIORITY OFFSET: if role_seniority scored 80 or higher, activity must not be scored below 50, no matter how quiet the profile looks.\n\nOutput ONLY valid JSON, no prose, in exactly this shape:\n{\"kpi_scores\": [{\"kpi\": \"field\", \"score\": 0, \"reason\": \"one short sentence\"}, ...]}\nInclude one entry per KPI you can actually measure. Omit \"network_proximity\" entirely when degree/mutuals data is not given - never include it with a guessed score.`;\n\nconst userMessage = `Search goal: ${campaign.search_goal}\n\nCandidate profile:\nName: ${profile.full_name || ''}\nHeadline: ${profile.headline || ''}\nLocation: ${profile.location || ''}\nAdditional data: ${JSON.stringify(profile.raw_data || {})}`;\n\nreturn {\n  json: {\n    profile_id: profile.id,\n    campaign_id: campaign.id,\n    kpi_weights: campaign.kpi_weights,\n    require_field: campaign.require_field,\n    require_location: campaign.require_location,\n    systemPrompt,\n    userMessage\n  }\n};",
+        "mode": "runOnceForEachItem"
+      },
+      "position": [672, 304],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "score_llm",
+      "name": "Score Profile (OpenRouter)",
+      "notes": "Attach an HTTP Header Auth credential (e.g. named 'OpenRouter') with header Authorization: Bearer <your OpenRouter API key>. Model: nvidia/nemotron-3.5-lightning:free (mistral's free tier was deprecated; lightning chosen over ultra since this is simple scoring, not heavy reasoning).",
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "jsonBody": "={{ { \"model\": \"nvidia/nemotron-3.5-lightning:free\", \"messages\": [ { \"role\": \"system\", \"content\": $json.systemPrompt }, { \"role\": \"user\", \"content\": $json.userMessage } ], \"response_format\": { \"type\": \"json_object\" } } }}",
+        "method": "POST",
+        "options": {},
+        "sendBody": true,
+        "specifyBody": "json",
+        "url": "https://openrouter.ai/api/v1/chat/completions"
+      },
+      "position": [880, 304],
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3
+    },
+    {
+      "id": "compute_composite",
+      "name": "Compute Composite Score",
+      "notes": "ARCHITECTURE MISMATCH (see Build Scoring Prompt note above): this arithmetic now lives correctly in clitools/scoring (Rust, 25 tests, sec.30-32 semantics including the same seniority floor and hard filters).",
+      "parameters": {
+        "jsCode": "const raw = $json;\nconst prompt = $('Build Scoring Prompt').item.json;\n\nlet parsed;\ntry {\n  const content = raw.choices[0].message.content;\n  parsed = typeof content === 'string' ? JSON.parse(content) : content;\n} catch (e) {\n  throw new Error('Could not parse LLM response as JSON: ' + e.message);\n}\n\nconst kpiScores = parsed.kpi_scores || [];\nconst weights = prompt.kpi_weights;\n\nconst seniority = kpiScores.find(k => k.kpi === 'role_seniority');\nconst activity = kpiScores.find(k => k.kpi === 'activity');\nif (seniority && activity && seniority.score >= 80 && activity.score < 50) {\n  activity.score = 50;\n}\n\nconst fieldScore = kpiScores.find(k => k.kpi === 'field');\nconst locationScore = kpiScores.find(k => k.kpi === 'location');\nconst filteredOut = !!(\n  (prompt.require_field && fieldScore && fieldScore.score === 0) ||\n  (prompt.require_location && locationScore && locationScore.score === 0)\n);\n\nconst totalWeight = kpiScores.reduce((sum, k) => sum + (weights[k.kpi] || 0), 0);\nconst rawSum = kpiScores.reduce((sum, k) => sum + k.score * (weights[k.kpi] || 0), 0);\nconst composite = totalWeight > 0 ? Math.round((rawSum / totalWeight) * 10000) / 100 : 0;\n\nreturn {\n  json: {\n    profile_id: prompt.profile_id,\n    kpi_scores: kpiScores,\n    composite,\n    filtered_out: filteredOut\n  }\n};",
+        "mode": "runOnceForEachItem"
+      },
+      "position": [1104, 304],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "filter_passed",
+      "name": "Passed Hard Filters?",
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "cond1",
+              "leftValue": "={{ $json.filtered_out }}",
+              "operator": { "operation": "equals", "type": "boolean" },
+              "rightValue": false
+            }
+          ],
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 }
+        },
+        "options": {}
+      },
+      "position": [1328, 304],
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2
+    },
+    {
+      "id": "save_score",
+      "name": "Save Score",
+      "notes": "Only reached when hard filters pass. scored_at defaults to now() in the DB schema. LEGACY: writes to a `score` table not present in the current schema.",
+      "parameters": {
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "profile_id", "fieldValue": "={{ $json.profile_id }}" },
+            { "fieldId": "kpi_scores", "fieldValue": "={{ JSON.stringify($json.kpi_scores) }}" },
+            { "fieldId": "composite", "fieldValue": "={{ $json.composite }}" }
+          ]
+        },
+        "tableId": "score"
+      },
+      "position": [1552, 208],
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1
+    }
+  ],
+  "connections": {
+    "Build Scoring Prompt": { "main": [[{ "index": 0, "node": "Score Profile (OpenRouter)", "type": "main" }]] },
+    "Compute Composite Score": { "main": [[{ "index": 0, "node": "Passed Hard Filters?", "type": "main" }]] },
+    "Get Campaign For Profile": { "main": [[{ "index": 0, "node": "Build Scoring Prompt", "type": "main" }]] },
+    "Get Profiles To Score": { "main": [[{ "index": 0, "node": "Get Campaign For Profile", "type": "main" }]] },
+    "Manual Trigger": { "main": [[{ "index": 0, "node": "Get Profiles To Score", "type": "main" }]] },
+    "Passed Hard Filters?": { "main": [[{ "index": 0, "node": "Save Score", "type": "main" }], []] },
+    "Score Profile (OpenRouter)": { "main": [[{ "index": 0, "node": "Compute Composite Score", "type": "main" }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "binaryMode": "separate"
+  }
+}
