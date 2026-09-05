@@ -1,0 +1,30 @@
+[package]
+name = "rust-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "Thin HTTP runtime adapter exposing clitools/ deterministic Rust tools to n8n. Owns no business logic of its own (CONTRACT.md sec.7,69)."
+
+[lib]
+name = "rust_runtime"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rust-runtime"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.7", default-features = false, features = ["json", "tokio", "http1", "query"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# The deterministic engines this runtime exposes. Path dependencies on the existing
+# clitools/ crates -- never copy or reimplement their logic here (requirement: reuse
+# existing crates, thin transport layer only).
+health = { path = "../../clitools/health" }
+scoring = { path = "../../clitools/scoring" }
+campaign_policy = { path = "../../clitools/campaign_policy" }
+
+[dev-dependencies]
+tower = { version = "0.4", features = ["util"] }
+http-body-util = "0.1"

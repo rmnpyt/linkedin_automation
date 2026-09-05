@@ -1,0 +1,41 @@
+# Example compose file for deploying rust-runtime beside an n8n instance on a shared,
+# non-public Docker network. This is a TEMPLATE for manual deployment (AGENT-START.md /
+# CONTRACT.md sec.90 fix) -- it is not applied automatically by anything in this repository.
+# Adapt the `n8n` service below to however n8n is actually deployed in your environment (it
+# may already exist as its own stack); the only requirement is that both services join the
+# same Docker network, and that the network is not published to a public interface.
+#
+# From the repository root:
+#   docker compose -f MCP/rust-runtime/docker-compose.example.yml up -d --build
+
+services:
+  rust-runtime:
+    build:
+      context: ../..
+      dockerfile: MCP/rust-runtime/Dockerfile
+    container_name: rust-runtime
+    restart: unless-stopped
+    networks:
+      - linkedin-automation-internal
+    environment:
+      RUST_RUNTIME_BIND_ADDR: "0.0.0.0:8080"
+    # No `ports:` mapping here on purpose (requirement: not exposed publicly by default).
+    # Add one (e.g. "127.0.0.1:18080:8080") only for local debugging on the host itself.
+
+  # Example only -- replace with your actual n8n service definition, or omit this block
+  # entirely and instead run `docker network connect linkedin-automation-internal
+  # <your-existing-n8n-container-name>` against your real n8n container.
+  # n8n:
+  #   image: n8nio/n8n:latest
+  #   networks:
+  #     - linkedin-automation-internal
+  #   ports:
+  #     - "5678:5678"
+
+networks:
+  linkedin-automation-internal:
+    driver: bridge
+    internal: false # set true to fully block this network's containers from reaching the
+                     # public internet too, if n8n itself does not need outbound access
+                     # (it does here, for OpenRouter/Apify -- leave false unless you add a
+                     # separate egress path)

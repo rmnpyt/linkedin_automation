@@ -3,6 +3,10 @@ name = "campaign_policy"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "campaign_policy"
+path = "src/lib.rs"
+
 [[bin]]
 name = "campaign_policy"
 path = "src/main.rs"

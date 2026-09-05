@@ -149,7 +149,7 @@
             { "fieldId": "trace_id", "fieldValue": "={{ $('Generate Trace ID').item.json.trace_id }}" },
             { "fieldId": "step_name", "fieldValue": "rust_tool_invocation" },
             { "fieldId": "state", "fieldValue": "RUNNING" },
-            { "fieldId": "provider", "fieldValue": "clitools/health" }
+            { "fieldId": "provider", "fieldValue": "rust-runtime:health" }
           ]
         },
         "operation": "create",
@@ -160,15 +160,83 @@
       "typeVersion": 1
     },
     {
-      "id": "exec_rust_tool",
-      "name": "Invoke Rust Tool (Expected to Fail)",
-      "notes": "EXPECTED TO FAIL: the n8n host has no access to this project's compiled clitools binary. onError=continueRegularOutput so the workflow proceeds to record the failure in workflow_step_run. Do not attempt to make this succeed by installing Rust on the n8n host or exposing local infra.",
+      "id": "call_rust_runtime_health",
+      "name": "Call Rust Runtime (GET /health)",
+      "notes": "REPLACES the deliberately-failing executeCommand stub (2026-09-05 Phase 0B fix): calls the rust-runtime service's GET /health endpoint, which itself invokes clitools/health's process() function -- a real, network-reachable invocation of a deterministic Rust tool, not a local-binary path the n8n host could never reach. Requires the rust-runtime container to be deployed on the same Docker network as this n8n instance (see MCP/rust-runtime/README.md). Override the hostname via the n8n host's RUST_RUNTIME_URL environment variable; defaults to http://rust-runtime:8080 (the container name used in MCP/rust-runtime/docker-compose.example.yml). onError=continueRegularOutput so a still-pending deployment is recorded as a normal FAILED step, not a broken workflow execution.",
       "onError": "continueRegularOutput",
       "parameters": {
-        "command": "./clitools/health/target/release/health"
+        "method": "GET",
+        "url": "={{ ($env.RUST_RUNTIME_URL || \"http://rust-runtime:8080\") + \"/health\" }}",
+        "options": {
+          "timeout": 5000
+        }
       },
       "position": [1568, 300],
-      "type": "n8n-nodes-base.executeCommand",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3
+    },
+    {
+      "id": "check_rust_runtime_result",
+      "name": "Check Rust Runtime Result",
+      "notes": "Distinguishes 'reached the service and got a valid health result' from every other outcome (connection refused/timeout because the service is not yet deployed, or an unexpected response shape) -- never treats an ambiguous response as success.",
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\n\nif (item && item.error) {\n  return [{\n    json: {\n      success: false,\n      error_code: 'RUST_RUNTIME_UNREACHABLE',\n      error_message: typeof item.error === 'string' ? item.error : JSON.stringify(item.error)\n    }\n  }];\n}\n\nif (item && item.ok === true && item.tool === 'health' && item.result && item.result.status === 'ok') {\n  return [{ json: { success: true } }];\n}\n\nconst expectedShape = 'ok:true, tool:health, result.status:ok';\nreturn [{\n  json: {\n    success: false,\n    error_code: 'RUST_RUNTIME_UNEXPECTED_RESPONSE',\n    error_message: 'GET /health did not return the expected (' + expectedShape + ') shape: ' + JSON.stringify(item)\n  }\n}];"
+      },
+      "position": [1792, 300],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "rust_runtime_reachable",
+      "name": "Rust Runtime Reachable?",
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "cond1",
+              "leftValue": "={{ $json.success }}",
+              "operator": { "operation": "equals", "type": "boolean" },
+              "rightValue": true
+            }
+          ],
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 }
+        },
+        "options": {}
+      },
+      "position": [2016, 300],
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2
+    },
+    {
+      "credentials": {
+        "supabaseApi": {
+          "id": "fQXC9iR0pHJF63Ir",
+          "name": "linkedin_automation"
+        }
+      },
+      "id": "complete_step_rust",
+      "name": "Complete Step Run - Rust Tool Invocation",
+      "notes": "Only reached when GET /health on the rust-runtime service actually returned {ok:true,...} -- this is the evidence CONTRACT.md sec.90 requires for 'n8n can invoke the first deterministic Rust tool'.",
+      "parameters": {
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "state", "fieldValue": "COMPLETED" },
+            { "fieldId": "finished_at", "fieldValue": "={{ $now.toISO() }}" }
+          ]
+        },
+        "filterType": "manual",
+        "filters": {
+          "conditions": [
+            { "condition": "eq", "keyName": "id", "keyValue": "={{ $('Insert Step Run - Rust Tool Invocation').item.json.id }}" }
+          ]
+        },
+        "matchType": "allFilters",
+        "operation": "update",
+        "tableId": "workflow_step_run"
+      },
+      "position": [2240, 208],
+      "type": "n8n-nodes-base.supabase",
       "typeVersion": 1
     },
     {
@@ -184,8 +252,8 @@
         "fieldsUi": {
           "fieldValues": [
             { "fieldId": "state", "fieldValue": "FAILED" },
-            { "fieldId": "error_code", "fieldValue": "ACCESS_PENDING" },
-            { "fieldId": "error_message", "fieldValue": "n8n host has no access to a compiled clitools binary; needs deployment path (HTTP wrapper or host-local binary) -- tracked as Phase 0B ACCESS_PENDING gate" },
+            { "fieldId": "error_code", "fieldValue": "={{ $json.error_code }}" },
+            { "fieldId": "error_message", "fieldValue": "={{ $json.error_message }}" },
             { "fieldId": "finished_at", "fieldValue": "={{ $now.toISO() }}" }
           ]
         },
@@ -199,7 +267,7 @@
         "operation": "update",
         "tableId": "workflow_step_run"
       },
-      "position": [1792, 300],
+      "position": [2240, 392],
       "type": "n8n-nodes-base.supabase",
       "typeVersion": 1
     },
@@ -229,7 +297,7 @@
         "operation": "update",
         "tableId": "workflow_run"
       },
-      "position": [2016, 300],
+      "position": [2464, 300],
       "type": "n8n-nodes-base.supabase",
       "typeVersion": 1
     }
@@ -254,10 +322,22 @@
       "main": [[{ "index": 0, "node": "Insert Step Run - Rust Tool Invocation", "type": "main" }]]
     },
     "Insert Step Run - Rust Tool Invocation": {
-      "main": [[{ "index": 0, "node": "Invoke Rust Tool (Expected to Fail)", "type": "main" }]]
+      "main": [[{ "index": 0, "node": "Call Rust Runtime (GET /health)", "type": "main" }]]
     },
-    "Invoke Rust Tool (Expected to Fail)": {
-      "main": [[{ "index": 0, "node": "Fail Step Run - Rust Tool Invocation", "type": "main" }]]
+    "Call Rust Runtime (GET /health)": {
+      "main": [[{ "index": 0, "node": "Check Rust Runtime Result", "type": "main" }]]
+    },
+    "Check Rust Runtime Result": {
+      "main": [[{ "index": 0, "node": "Rust Runtime Reachable?", "type": "main" }]]
+    },
+    "Rust Runtime Reachable?": {
+      "main": [
+        [{ "index": 0, "node": "Complete Step Run - Rust Tool Invocation", "type": "main" }],
+        [{ "index": 0, "node": "Fail Step Run - Rust Tool Invocation", "type": "main" }]
+      ]
+    },
+    "Complete Step Run - Rust Tool Invocation": {
+      "main": [[{ "index": 0, "node": "Complete Workflow Run", "type": "main" }]]
     },
     "Fail Step Run - Rust Tool Invocation": {
       "main": [[{ "index": 0, "node": "Complete Workflow Run", "type": "main" }]]

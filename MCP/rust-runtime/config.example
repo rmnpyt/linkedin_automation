@@ -1,0 +1,19 @@
+# Configuration for the rust-runtime service (MCP/rust-runtime/). Copy the variables below
+# into your container/orchestration tool of choice (do not commit a file containing real
+# values under a name matching *.env*; this repository's .gitignore blocks that pattern).
+#
+# This service needs no secrets: it wraps pure, deterministic Rust functions with no network
+# calls, no database access, and no provider credentials of its own (CONTRACT.md sec.7).
+
+# Address/port the HTTP server binds to inside the container. Almost never needs to change --
+# the container's published port mapping (see docker-compose.example.yml) is what actually
+# controls what's reachable from outside the container.
+RUST_RUNTIME_BIND_ADDR=0.0.0.0:8080
+
+# --- Consumed by n8n, not by this service ---
+# Set this on the n8n side (n8n's own environment, not this service) so the
+# "Call Rust Runtime (GET /health)" node in n8n/shared/00_phase0b_foundation_check.json knows
+# where to reach this service. Only needed if you name the container/network alias something
+# other than the default "rust-runtime" used throughout this project's docs and compose
+# example. Requires n8n's environment-variable access in expressions ($env) to be enabled.
+# RUST_RUNTIME_URL=http://rust-runtime:8080
