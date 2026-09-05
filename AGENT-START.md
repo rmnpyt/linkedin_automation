@@ -143,6 +143,11 @@ The agent MUST use the existing Git identity configured by the user.
 The agent MUST NOT change `user.name`, `user.email`, commit signing identity, or credential configuration merely to identify itself as an AI agent.
 
 Commits created by the agent are normal local project commits under the user's existing Git configuration.
+Do not add Claude, Anthropic, Codex, OpenAI, or any AI agent as a Git author, co-author, committer attribution, sign-off, or commit-message trailer.
+
+Do not add any `Co-authored-by` trailer for AI agents.
+
+All commits must use only the repository's existing human Git identity unless the human explicitly requests otherwise.
 
 ## 5.2 Existing Working Tree
 
