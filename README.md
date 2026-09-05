@@ -12,11 +12,20 @@ where the Contract leaves room, `doc/PLAN.md` defines build order and architectu
 **Explicitly out of scope for this build:** Stream 3 (Customer Automation), a public SaaS
 product, billing/subscriptions, a generalized CRM, and multi-tenant admin.
 
-**Current status at handoff:** Phases 0A through 1.5 are implemented, tested, independently
-reviewed, and committed. Phase 2.1 (Story Discovery) has its persistence layer built and
-tested but not its full human-validation acceptance. Phase 1.6 (real end-to-end acquisition)
-and the rest of Phase 2.x require external authorization/access this repository does not
-have — see "Current implementation/validation status" below.
+**Current status at handoff:** Phases 0A through 1.5 are implemented and automated-tested,
+but an independent completion audit (2026-09-05, see "Current implementation/validation
+status" below) found that an earlier report overstated several of them as fully
+Contract-satisfied. Only **Phase 0A** holds up as `DONE — CONTRACT SATISFIED` under
+re-verification. **Phase 0B is `INCOMPLETE`**: the Contract requires n8n to actually invoke
+the first deterministic Rust tool, and there is no evidence this has ever succeeded — the
+only workflow built for this has zero recorded executions, and its Rust-invocation node is
+built to deliberately fail (a local relative path an n8n host cannot reach), with an explicit
+comment not to make it succeed. Phases 1.1-1.4 have real automated-verification-passed
+mechanisms but unmet real/human/live criteria (detailed below). Phase 1.5 has 7 of 9
+criteria solidly built and tested, but two depend on the real PowerShell sender script,
+which was never obtained. Phase 2.1 (Story Discovery) has its persistence layer built and
+tested but not its full human-validation acceptance. Phase 1.6 and the rest of Phase 2.x
+require external authorization/access this repository does not have.
 
 ## Architecture overview
 
@@ -113,8 +122,12 @@ environment; `cargo build`/`test` do not require them.
 ## n8n workflow import/export and naming conventions
 
 - Every material, Contract-adopted workflow is exported as JSON under `n8n/shared/`.
-  Currently: `00_phase0b_foundation_check.json` (a smoke-test workflow verifying Supabase
-  connectivity and the Rust tool contract).
+  Currently: `00_phase0b_foundation_check.json`, a workflow *designed* to check Supabase
+  connectivity, the LLM gateway, and Rust-tool invocation from n8n — but it has **never
+  actually been executed** (confirmed via `n8n_list_executions` and an empty `workflow_run`
+  table). Its Rust-invocation node is also built to deliberately fail. See "Current
+  implementation/validation status" below; treat this workflow as a design draft, not
+  verified plumbing.
 - `n8n/legacy/` holds three pre-Contract prototype workflows found on the instance at the
   start of this build, exported for institutional-knowledge purposes (working Apify actor
   names, confirmed OpenRouter model names, a documented free-tier rate limit) but **not
@@ -206,19 +219,29 @@ Read in this order: [`AGENT-START.md`](AGENT-START.md) →
 
 ## Current implementation/validation status
 
-| Phase | Status |
-|---|---|
-| 0A — Domain foundation schema | **DONE — CONTRACT SATISFIED.** Reviewed, tested, committed (`c5d3fcc`). |
-| 0B — Runtime foundation | **DONE — CONTRACT SATISFIED.** Reviewed, tested, committed (`b7a437f`). |
-| 1.1 — KPI scoring engine | **DONE — CONTRACT SATISFIED.** 25 Rust tests, reviewed, committed (`0ce6c47`). |
-| 1.2 — Search/identity/budget | **DONE — CONTRACT SATISFIED** (scoped to what does not require a real paid search). Reviewed, tested, committed (`78b0688`). |
-| 1.3 — Contact enrichment | **DONE — CONTRACT SATISFIED** (scoped to what does not require a real paid enrichment call). Reviewed, tested, committed (`bb0f414`). |
-| 1.4 — Connection note generation | **DONE — CONTRACT SATISFIED.** Reviewed, tested, committed (`69ce34e`). |
-| 1.5 — Safe sending | **DONE — CONTRACT SATISFIED** for everything not requiring a real send. Reviewed, tested, committed (`fa54612`). |
-| n8n legacy reconciliation | Done — pre-Contract prototypes inspected, exported, documented as not-adopted (`3265eeb`). |
-| 2.1 — Story Discovery | **IMPLEMENTED — LIVE VALIDATION PENDING.** Persistence/versioning/provenance built, reviewed, tested (`5dc6939`). Running Story Discovery on both real current operators and the required human usability judgment (CONTRACT.md sec.50) needs real personal source material not available in this repository — **ACCESS_PENDING / HUMAN_DECISION_REQUIRED.** |
-| 1.6 — End-to-end acquisition | **BLOCKED.** Every building block it needs (search/enrichment/scoring/notes/sending) is already built and tested individually. Full acceptance additionally requires a real paid search, a real paid enrichment call, and a real LinkedIn send — all of which need an explicit non-zero test-budget authorization and a real-send authorization this repository does not have, plus the missing PowerShell sender script. |
-| 2.2-2.4 (further Stream 2) | Not started — depend on a real Phase 2.1 StoryProfile. |
+**Corrected 2026-09-05 by an independent completion audit.** An earlier report in this
+project's history claimed Phases 0A-1.5 were `DONE — CONTRACT SATISFIED`. That claim was
+re-verified line-by-line against `doc/CONTRACT.md`'s exact acceptance criteria, the live
+development Supabase project (every phase's pgTAP suite was rerun fresh, not assumed from
+memory), and available n8n execution evidence. The audit found several criteria that
+automated tests cannot satisfy — real/paid-provider validation, human review of real data,
+and one architecturally-blocked runtime requirement — had been silently treated as met. The
+table below reflects the corrected findings; the classifications below are precise, not
+approximate.
+
+| Phase | Status | Unresolved gate(s) |
+|---|---|---|
+| 0A — Domain foundation schema | **DONE — CONTRACT SATISFIED.** | None. All 14 CONTRACT.md sec.89 criteria map to a passing pgTAP assertion or a directly-inspected schema fact (35 assertions re-run live, 35/35 pass, zero residue). No criterion in sec.89 requires real/live/human validation. |
+| 0B — Runtime foundation | **INCOMPLETE.** | CONTRACT.md sec.90 requires n8n to actually invoke the Supabase project, the LLM gateway, and the first deterministic Rust tool. The only workflow built for this (`n8n/shared/00_phase0b_foundation_check.json`) has **zero recorded executions** — confirmed via both `n8n_list_executions` (empty for this workflow) and the live `workflow_run`/`workflow_step_run` tables (0 rows total, from any workflow, ever). The Rust-tool-invocation node is not merely unexecuted — it is built to deliberately fail (`command: "./clitools/health/target/release/health"`, a path only valid on the machine this was built on, not any real n8n host) with an explicit code comment: "Do not attempt to make this succeed by installing Rust on the n8n host or exposing local infra." No successful `n8n → Rust tool` invocation has ever occurred, and the current design cannot produce one without new infrastructure (an HTTP-wrapped tool or a host-reachable binary) that has not been built. Secrets-outside-source-control is the one criterion independently confirmed true (every credential is referenced by n8n credential-store ID, never embedded). |
+| 1.1 — KPI scoring engine | **IMPLEMENTED — AUTOMATED VERIFICATION PASSED — LIVE VALIDATION PENDING.** | The deterministic Rust scorer, its 25 tests (re-run, 25/25 pass), the versioned `doc/prompts/profile-evaluator/v1.md` prompt, and the missing-evidence/hard-filter/KPI-6-floor rules are all real and correct. But CONTRACT.md sec.91 also requires "approximately ten real profiles have passed human sanity review" — this has not happened; no real profile has ever been scored by this system, mock or otherwise, and no human has reviewed any output. `evaluation.model_provider`/`model_name`/`prompt_version` are nullable and were never populated by any test fixture, so "Evaluation provenance is persisted" is schema capacity, not demonstrated behavior. |
+| 1.2 — Search/identity/budget | **IMPLEMENTED — AUTOMATED VERIFICATION PASSED — LIVE VALIDATION PENDING.** | Budget-reservation concurrency safety, identity resolution, and the unique-candidate cap are real and tested (re-run, 27/27 pass). CONTRACT.md sec.92 explicitly requires "real HarvestAPI search has been validated" and "at least one authenticated-search benchmark is exercised, or an explicit authorized human waiver is recorded" — neither has happened; no real Apify/HarvestAPI call has ever been made and no waiver is on record. An earlier report's "(scoped to what does not require a real paid search)" framing was an invented narrowing not present in the Contract text, and is retracted. |
+| 1.3 — Contact enrichment | **IMPLEMENTED — AUTOMATED VERIFICATION PASSED — LIVE VALIDATION PENDING.** | CONTRACT.md sec.93 has no explicit "real"/"live" bullet (unlike sec.91/92), and every listed criterion (score threshold, count/cost caps, campaign-wide aggregation, no-result handling) is mechanism-tested (re-run, 7/7 pass). Downgraded from DONE anyway for honesty: no real enrichment provider call has ever been made, so "actual enrichment usage/cost is recorded" has only ever recorded synthetic zero-cost data, never a real provider response. |
+| 1.4 — Connection note generation | **IMPLEMENTED — AUTOMATED VERIFICATION PASSED — LIVE VALIDATION PENDING.** | The persistence/state-machine layer (NOTE_READY gating tied to an exact fresh/qualified/governing Evaluation, supersession, recoverable-failure, 300-char limit) is real and tested (re-run, 15/15 pass). But every test supplies the note body as a literal string — the actual LLM generation step described in `doc/prompts/connection-note/v1.md` has never been invoked by anything in this repository, mock or real (same zero-n8n-execution gap as Phase 0B). CONTRACT.md sec.94's "generic context-free notes are not accepted as successful output" is also not enforced by any code — only instructed in the prompt document; no mechanism here would actually reject a generic note if one were supplied. |
+| 1.5 — Safe sending | **ACCESS_PENDING.** | 9 of 11 CONTRACT.md sec.95 criteria (ConnectionAttempt exists, CampaignCandidate attribution, exact authorizing Evaluation + persisted note attribution, idempotency, concurrent-claim prevention via row locks, failed-send recording, UNKNOWN_SEND_RESULT, no-blind-retry, daily/window limits) are real and tested (re-run, 26/26 pass). The remaining two are unmet, not pending a live click: "existing browser sender is behind a stable ConnectionSender boundary" — the existing script referenced in MINDSET.md was never obtained, so nothing was ever wrapped, only a contract for a hypothetical future script was written; "session/account challenges stop safely" — this is a real sender's runtime behavior, unverifiable without that sender. Both gate on the same missing external asset. |
+| n8n legacy reconciliation | Done — pre-Contract prototypes inspected, exported, documented as not-adopted (`3265eeb`). | None. |
+| 2.1 — Story Discovery | **IMPLEMENTED — AUTOMATED VERIFICATION PASSED — LIVE VALIDATION PENDING.** | Persistence/versioning/provenance built, reviewed, tested (`5dc6939`, 18/18 pass). Running Story Discovery on both real current operators and the required human usability judgment (CONTRACT.md sec.50) needs real personal source material not available in this repository — **ACCESS_PENDING / HUMAN_DECISION_REQUIRED.** |
+| 1.6 — End-to-end acquisition | **BLOCKED.** | Every individual building block it needs is built and unit/integration-tested at the Rust/SQL layer, but Phase 0B's unresolved n8n↔Rust-tool gap means no phase of this pipeline has ever actually been orchestrated end-to-end by n8n either. Full acceptance additionally requires a real paid search, a real paid enrichment call, and a real LinkedIn send, none authorized, plus the missing PowerShell sender script. |
+| 2.2-2.4 (further Stream 2) | Not started — depend on a real Phase 2.1 StoryProfile. | |
 
 **No commit in this history was pushed to any remote** — this repository currently has no
 remote configured at all (`git remote -v` returns nothing). All work is local and ready for
